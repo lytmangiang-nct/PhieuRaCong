@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "lytm.angiang@gmail.com" ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+    }
+
+    function isStudent() {
+      return isAuthenticated() && getUserData().role == 'student';
+    }
+
+    // GatePass validation
+    function isValidGatePass(data) {
+      return data.fullName is string && data.fullName.size() > 0 && data.fullName.size() <= 200 &&
+             data.reason is string && data.reason.size() > 0 && data.reason.size() <= 1000 &&
+             data.exitTime is string &&
+             data.uid == request.auth.uid &&
+             (data.status in ['pending', 'Chờ duyệt']) &&
+             (!('phoneNumber' in data) || (data.phoneNumber is string && data.phoneNumber.size() <= 30)) &&
+             (!('passId' in data) || (data.passId is string && data.passId.size() <= 100));
+    }
+
+    function isMasterAdmin() {
+      return isAuthenticated() && request.auth.token.email == "lytm.angiang@gmail.com";
+    }
+
+    match /gatepasses/{passId} {
+      // Allow single get for verification (e.g. guards scanning QR code directly)
+      allow get: if true;
+      // Listing passes requires authentication (students see their own, admins see all)
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdmin());
+      
+      // Cho phep ca hoc sinh va quan tri vien tao phieu hop le
+      allow create: if isAuthenticated() && isValidGatePass(request.resource.data);
+      
+      // Admins can update status, approver metadata and expiration. Students can also update expiration on their own passes.
+      allow update: if (isAdmin() && 
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'approvedAt', 'approvedBy', 'approverRole', 'approverPosition', 'approverEmail', 'expiredAt']) &&
+                        request.resource.data.status in ['approved', 'rejected', 'pending', 'Đã duyệt', 'Từ chối', 'Chờ duyệt', 'Đã hết hạn', 'expired', 'Đã hết hạn ra cổng']) ||
+                       (isAuthenticated() && resource.data.uid == request.auth.uid &&
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'expiredAt']) &&
+                        request.resource.data.status in ['Đã hết hạn', 'expired', 'Đã hết hạn ra cổng']);
+      
+      // Chi Master Admin (lytm.angiang@gmail.com) moi duoc xoa phieu dang ky
+      allow delete: if isMasterAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      // Master admin can create/delete accounts, normal users can create their own student profile
+      allow create: if (isOwner(userId) && request.resource.data.role == 'student') || isMasterAdmin();
+      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      allow delete: if isMasterAdmin();
+    }
+
+    match /admin_whitelist/{emailKey} {
+      allow read: if isAuthenticated();
+      // Chi Master Admin moi duoc them/sua whitelist tai khoan quan tri
+      allow write: if isMasterAdmin();
+    }
+
+    match /account_directory/{key} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+  }
+}

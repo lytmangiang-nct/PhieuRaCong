@@ -1,0 +1,90 @@
+{
+  "entities": {
+    "GatePass": {
+      "title": "Gate Pass",
+      "description": "A request to exit the gate.",
+      "type": "object",
+      "properties": {
+        "fullName": { "type": "string", "description": "Full name of the person." },
+        "department": { "type": "string", "description": "Department of the person." },
+        "phoneNumber": { "type": "string", "description": "10-digit contact phone number of the person." },
+        "reason": { "type": "string", "description": "Reason for leaving." },
+        "exitTime": { "type": "string", "format": "date-time", "description": "Requested exit time." },
+        "passId": { "type": "string", "description": "Unique human-readable pass ID (e.g. GP-260923-1234)." },
+        "photoUrl": { "type": "string", "description": "Base64 or URL of the captured photo." },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "Chờ duyệt", "Đã duyệt", "Từ chối", "Đã hết hạn", "expired", "Đã hết hạn ra cổng"], "description": "Current status of the pass." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Time the pass was created." },
+        "uid": { "type": "string", "description": "User ID of the creator." },
+        "approvedAt": { "type": "string", "description": "Timestamp when approved or rejected." },
+        "expiredAt": { "type": "string", "description": "Timestamp when the pass expired after 30 minutes of approval." },
+        "approvedBy": { "type": "string", "description": "Full name of the person who approved/rejected." },
+        "approverRole": { "type": "string", "description": "Role or position of the approver." },
+        "approverPosition": { "type": "string", "description": "Position or job title of the approver." },
+        "approverEmail": { "type": "string", "description": "Email address of the approver." }
+      },
+      "required": ["fullName", "reason", "exitTime", "uid"]
+    },
+    "User": {
+      "title": "User Profile",
+      "description": "User profile information.",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "admin"] },
+        "position": { "type": "string", "description": "Official title or position (e.g. Giám thị, Ban Giám Hiệu)" },
+        "className": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "isVerified": { "type": "boolean" }
+      },
+      "required": ["email"]
+    },
+    "AdminWhitelist": {
+      "title": "Admin Whitelist",
+      "description": "Pre-approved admin emails and initial approver profile data.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin"] },
+        "position": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["email", "role"]
+    },
+    "AccountDirectory": {
+      "title": "Account Directory",
+      "description": "Public directory for phone/name lookup to sign in without email.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "admin"] },
+        "position": { "type": "string" },
+        "className": { "type": "string" },
+        "phoneNumber": { "type": "string" }
+      },
+      "required": ["email"]
+    }
+  },
+  "firestore": {
+    "/gatepasses/{passId}": {
+      "schema": "GatePass",
+      "description": "Collection of gate passes."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile data."
+    },
+    "/admin_whitelist/{emailKey}": {
+      "schema": "AdminWhitelist",
+      "description": "Whitelisted administrator emails with approval permissions."
+    },
+    "/account_directory/{key}": {
+      "schema": "AccountDirectory",
+      "description": "Index for phone/name account resolution."
+    }
+  }
+}
