@@ -102,6 +102,10 @@ export type ApproverPosition = typeof APPROVER_POSITIONS[number];
 // Thời gian hiệu lực của phiếu ra cổng: 30 phút kể từ lúc admin/cán bộ duyệt phiếu
 export const GATE_PASS_VALIDITY_MS = 30 * 60 * 1000;
 
+// Liên kết Webhook Make.com và Tên trang tính Google Sheets chính thức của toàn hệ thống
+export const OFFICIAL_MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/tvuujqswrn3xh2ksq6kw7mtb2edfkeoi";
+export const OFFICIAL_SHEET_NAME = "RaCong";
+
 interface GatePass {
   id?: string;
   passId?: string;
@@ -525,17 +529,23 @@ function GatePassApp() {
   const [isLoadingAdminList, setIsLoadingAdminList] = useState(false);
   const [adminModalTab, setAdminModalTab] = useState<'create' | 'list'>('create');
 
-  // Integration Settings (Make AI & Google Sheets)
-  const [integrationWebhook, setIntegrationWebhook] = useState(() => {
+  // Integration Settings (Make AI & Google Sheets) - Liên kết chính thức cố định trên mọi thiết bị
+  const [integrationWebhook, setIntegrationWebhook] = useState<string>(() => {
     const saved = localStorage.getItem('config_webhook_url');
-    if (!saved || saved.includes("abc123.ngrok") || saved.includes("localhost:5678")) {
-      const defaultMakeUrl = "https://hook.eu2.make.com/your_make_webhook_id";
-      localStorage.setItem('config_webhook_url', defaultMakeUrl);
-      return defaultMakeUrl;
+    if (!saved || saved.includes("your_make_webhook_id") || saved.includes("abc123.ngrok") || saved.includes("localhost:5678") || saved.includes("hook.eu2.make.com/your")) {
+      localStorage.setItem('config_webhook_url', OFFICIAL_MAKE_WEBHOOK_URL);
+      return OFFICIAL_MAKE_WEBHOOK_URL;
     }
     return saved;
   });
-  const [integrationSheetName, setIntegrationSheetName] = useState(() => localStorage.getItem('config_sheet_name') || "DanhSachRaCong");
+  const [integrationSheetName, setIntegrationSheetName] = useState<string>(() => {
+    const saved = localStorage.getItem('config_sheet_name');
+    if (!saved || saved === "DanhSachRaCong") {
+      localStorage.setItem('config_sheet_name', OFFICIAL_SHEET_NAME);
+      return OFFICIAL_SHEET_NAME;
+    }
+    return saved;
+  });
   const [showIntegrations, setShowIntegrations] = useState(false);
   const [syncingPassId, setSyncingPassId] = useState<string | null>(null);
   const [isBulkSyncing, setIsBulkSyncing] = useState(false);
@@ -860,7 +870,7 @@ function GatePassApp() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `DanhSachRaCong_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute("download", `RaCong_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1202,6 +1212,44 @@ function GatePassApp() {
     });
 
     return () => unsubscribe();
+  }, [user, userProfile, isMockMode]);
+
+  // Đồng bộ cấu hình Webhook Make AI & Google Sheets chính thức từ Firestore cố định trên mọi thiết bị
+  useEffect(() => {
+    if (isMockMode) return;
+    const unsub = onSnapshot(doc(db, 'system_settings', 'integration'), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const firestoreWebhook = (data?.webhookUrl && !data.webhookUrl.includes("your_make_webhook_id")) ? data.webhookUrl : OFFICIAL_MAKE_WEBHOOK_URL;
+        const firestoreSheet = (data?.sheetName && data.sheetName !== "DanhSachRaCong") ? data.sheetName : OFFICIAL_SHEET_NAME;
+        setIntegrationWebhook(firestoreWebhook);
+        setIntegrationSheetName(firestoreSheet);
+        localStorage.setItem('config_webhook_url', firestoreWebhook);
+        localStorage.setItem('config_sheet_name', firestoreSheet);
+      } else {
+        // Khởi tạo mặc định cấu hình chính thức
+        setIntegrationWebhook(OFFICIAL_MAKE_WEBHOOK_URL);
+        setIntegrationSheetName(OFFICIAL_SHEET_NAME);
+        localStorage.setItem('config_webhook_url', OFFICIAL_MAKE_WEBHOOK_URL);
+        localStorage.setItem('config_sheet_name', OFFICIAL_SHEET_NAME);
+
+        // Nếu là Admin hoặc Master Admin thì lưu cấu hình chính thức lên Firestore để đồng bộ toàn hệ thống
+        if (user && (userProfile?.role === 'admin' || user.email === 'lytm.angiang@gmail.com')) {
+          setDoc(doc(db, 'system_settings', 'integration'), {
+            webhookUrl: OFFICIAL_MAKE_WEBHOOK_URL,
+            sheetName: OFFICIAL_SHEET_NAME,
+            updatedAt: new Date().toISOString(),
+            updatedBy: user.email || 'Admin'
+          }, { merge: true }).catch(err => console.warn("Lỗi khởi tạo cấu hình hệ thống lên Firestore:", err));
+        }
+      }
+    }, (error) => {
+      console.warn("Lỗi đồng bộ cấu hình hệ thống từ Firestore:", error);
+      setIntegrationWebhook(OFFICIAL_MAKE_WEBHOOK_URL);
+      setIntegrationSheetName(OFFICIAL_SHEET_NAME);
+    });
+
+    return () => unsub();
   }, [user, userProfile, isMockMode]);
 
   // --- Handlers ---
@@ -1813,10 +1861,15 @@ function GatePassApp() {
 
   const sendWebhookNotification = async (payload: any): Promise<{ success: boolean; message: string }> => {
     try {
-      const webhookUrl = integrationWebhook?.trim();
+      const webhookUrl = (integrationWebhook?.trim() && !integrationWebhook.includes("your_make_webhook_id"))
+        ? integrationWebhook.trim()
+        : OFFICIAL_MAKE_WEBHOOK_URL;
+      const targetSheet = (integrationSheetName?.trim() && integrationSheetName.trim() !== "DanhSachRaCong")
+        ? integrationSheetName.trim()
+        : OFFICIAL_SHEET_NAME;
       
-      if (!webhookUrl || webhookUrl === "https://hook.eu2.make.com/your_make_webhook_id") {
-        const msg = "Vui lòng nhập URL Webhook Make.com của bạn trước khi gửi dữ liệu.";
+      if (!webhookUrl) {
+        const msg = "Vui lòng nhập URL Webhook Make.com trước khi gửi dữ liệu.";
         console.warn("⚠️ [Make Webhook]:", msg);
         return { success: false, message: msg };
       }
@@ -1939,7 +1992,7 @@ function GatePassApp() {
                      `✅ Thời gian duyệt phiếu: ${approvedAtVN}\n` +
                      (expiredAtVN ? `⏳ Thời hạn hiệu lực đến: ${expiredAtVN}\n` : '') +
                      `==================================\n` +
-                     `Hệ thống GatePass AI - Tự động đồng bộ sang Google Sheets DanhSachRaCong.`;
+                     `Hệ thống GatePass AI - Tự động đồng bộ sang Google Sheets ${targetSheet}.`;
       } else if (payload.action === "sync") {
         const transStatus = (payload.status === 'approved' || payload.status === 'Đã duyệt') 
           ? '✅ ĐÃ DUYỆT (CHO PHÉP RA CỔNG)' 
@@ -1962,7 +2015,7 @@ function GatePassApp() {
                      (approvedAtVN ? `✍️ Người duyệt: ${approverNameDisplay}\n🎖️ Chức vụ: ${approverPositionDisplay}\n✅ Thời gian duyệt phiếu: ${approvedAtVN}\n` : '') +
                      (expiredAtVN ? `⏳ Hết hạn: ${expiredAtVN}\n` : '') +
                      `==================================\n` +
-                     `Đã đồng bộ sang thẻ Google Sheets: ${integrationSheetName || "DanhSachRaCong"}`;
+                     `Đã đồng bộ sang thẻ Google Sheets: ${targetSheet}`;
       } else if (payload.action === "test") {
         const testApproverName = payload.nguoi_duyet || userProfile?.displayName || 'Trần Minh Lý';
         const testApproverPos = payload.chuc_vu_nguoi_duyet || userProfile?.position || 'Bí thư ĐT';
@@ -2052,8 +2105,10 @@ function GatePassApp() {
         loai_su_kien: isExpired 
           ? "Phiếu đã hết hạn (Không gửi mail)" 
           : (payload.action === "create" ? "Tạo phiếu mới" : (payload.action === "update_status" ? "Duyệt/Từ chối" : (payload.action === "test" ? "Kiểm tra mẫu" : "Đồng bộ phiếu (Không gửi mail)"))),
-        googleSheetName: integrationSheetName || "DanhSachRaCong",
-        ten_sheet: integrationSheetName || "DanhSachRaCong",
+        googleSheetName: targetSheet,
+        ten_sheet: targetSheet,
+        sheet_name: targetSheet,
+        sheetName: targetSheet,
 
         // 7. QUY TẮC GỬI EMAIL CHÍNH XÁC (CHỈ GỬI KHI BẤM GỬI PHIẾU HOẶC DUYỆT PHIẾU, KHÔNG GỬI KHI HẾT HẠN)
         gui_qua_mail: shouldSendEmail ? "Có" : "Không",
@@ -2418,7 +2473,7 @@ function GatePassApp() {
           status: vnStatus,
           updatedAt: approvedAtVal,
           approvedAt: approvedAtVal,
-          // Chính xác tên và chức vụ cập nhật lên DanhSachRaCong
+          // Chính xác tên và chức vụ cập nhật lên RaCong
           nguoi_duyet: approverNameVal,
           chuc_vu: approverPositionVal,
           chuc_vu_nguoi_duyet: approverPositionVal,
@@ -2457,7 +2512,7 @@ function GatePassApp() {
           status: vnStatus,
           updatedAt: approvedAtVal,
           approvedAt: approvedAtVal,
-          // Chính xác tên và chức vụ cập nhật lên DanhSachRaCong
+          // Chính xác tên và chức vụ cập nhật lên RaCong
           nguoi_duyet: approverNameVal,
           chuc_vu: approverPositionVal,
           chuc_vu_nguoi_duyet: approverPositionVal,
@@ -4027,7 +4082,7 @@ function GatePassApp() {
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
                           <label className="text-[11px] text-[#8E9299] font-bold uppercase tracking-wider block">
-                            Make.com Webhook URL (Custom Webhook)
+                            Make.com Webhook URL (Liên kết chính thức của hệ thống)
                           </label>
                           <span className="text-[10px] font-mono text-[#00FF00] bg-[#00FF00]/10 px-2 py-0.5 rounded border border-[#00FF00]/20">
                             HTTPS POST
@@ -4041,44 +4096,23 @@ function GatePassApp() {
                             setIntegrationWebhook(e.target.value);
                             localStorage.setItem('config_webhook_url', e.target.value);
                           }}
-                          placeholder="https://hook.eu2.make.com/your_webhook_id"
+                          placeholder={OFFICIAL_MAKE_WEBHOOK_URL}
                         />
-                        
-                        {/* Server gợi ý */}
-                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                          <span className="text-[10px] text-[#8E9299]">Mẫu server:</span>
+
+                        {/* Nút khôi phục cấu hình chính thức & Gợi ý */}
+                        <div className="space-y-1.5 pt-1">
                           <button
                             type="button"
                             onClick={() => {
-                              const sample = "https://hook.eu1.make.com/";
-                              setIntegrationWebhook(sample);
-                              localStorage.setItem('config_webhook_url', sample);
+                              setIntegrationWebhook(OFFICIAL_MAKE_WEBHOOK_URL);
+                              setIntegrationSheetName(OFFICIAL_SHEET_NAME);
+                              localStorage.setItem('config_webhook_url', OFFICIAL_MAKE_WEBHOOK_URL);
+                              localStorage.setItem('config_sheet_name', OFFICIAL_SHEET_NAME);
                             }}
-                            className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#0c0d0f] border border-[#1c1d21] text-[#8E9299] hover:text-[#00FF00] transition-colors"
+                            className="w-full py-1.5 px-3 rounded-lg bg-[#00FF00]/10 border border-[#00FF00]/30 hover:bg-[#00FF00]/20 text-[#00FF00] font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all cursor-pointer"
                           >
-                            hook.eu1.make.com
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const sample = "https://hook.eu2.make.com/";
-                              setIntegrationWebhook(sample);
-                              localStorage.setItem('config_webhook_url', sample);
-                            }}
-                            className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#0c0d0f] border border-[#1c1d21] text-[#8E9299] hover:text-[#00FF00] transition-colors"
-                          >
-                            hook.eu2.make.com
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const sample = "https://hook.us1.make.com/";
-                              setIntegrationWebhook(sample);
-                              localStorage.setItem('config_webhook_url', sample);
-                            }}
-                            className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#0c0d0f] border border-[#1c1d21] text-[#8E9299] hover:text-[#00FF00] transition-colors"
-                          >
-                            hook.us1.make.com
+                            <Sparkles className="w-3.5 h-3.5" />
+                            Khôi phục Webhook & Trang tính Chính thức ({OFFICIAL_SHEET_NAME})
                           </button>
                         </div>
                       </div>
@@ -4095,10 +4129,10 @@ function GatePassApp() {
                             setIntegrationSheetName(e.target.value);
                             localStorage.setItem('config_sheet_name', e.target.value);
                           }}
-                          placeholder="DanhSachRaCong"
+                          placeholder={OFFICIAL_SHEET_NAME}
                         />
                         <span className="text-[10px] text-[#8E9299] italic block">
-                          Tên của thẻ Sheet bên trong bảng tính Google Spreadsheet (ví dụ: DanhSachRaCong).
+                          Tên của thẻ Sheet bên trong bảng tính Google Spreadsheet (Mặc định: {OFFICIAL_SHEET_NAME}).
                         </span>
                       </div>
                     </div>
@@ -4142,7 +4176,7 @@ function GatePassApp() {
                             3
                           </span>
                           <div>
-                            <strong className="text-white">Cập nhật Google Sheets ({integrationSheetName || "DanhSachRaCong"}):</strong>
+                            <strong className="text-white">Cập nhật Google Sheets ({integrationSheetName || OFFICIAL_SHEET_NAME}):</strong>
                             <p className="mt-0.5">
                               Tạo cột trên sheet tương ứng và map biến trong module <strong className="text-white">Google Sheets [Add a Row]</strong>:
                             </p>
@@ -4232,7 +4266,7 @@ function GatePassApp() {
                                 { vn: 'link_xac_minh', en: 'verifyUrl', desc: 'Đường link thẻ bảo vệ trực tuyến xác minh mã QR', sheetCol: 'Cột N (Link xác minh)' },
                                 { vn: 'anh_khuon_mat', en: 'photoUrl', desc: 'Dữ liệu hoặc liên kết ảnh chụp nhận diện khuôn mặt', sheetCol: 'Cột O (Ảnh nhận diện)' },
                                 { vn: 'loai_su_kien', en: 'action', desc: 'Loại sự kiện (Tạo mới / Duyệt / Hết hạn / Đồng bộ)', sheetCol: 'Cột P (Sự kiện)' },
-                                { vn: 'ten_sheet', en: 'googleSheetName', desc: 'Tên thẻ bảng tính Google Sheets đích', sheetCol: 'Thẻ bảng tính' },
+                                { vn: 'ten_sheet', en: 'googleSheetName', desc: `Tên thẻ bảng tính Google Sheets đích (mặc định: ${OFFICIAL_SHEET_NAME})`, sheetCol: 'Thẻ bảng tính' },
                                 { vn: 'noi_dung_thong_bao', en: 'message', desc: 'Đoạn văn bản tóm tắt đầy đủ để gửi Bot/Telegram/Email', sheetCol: 'Cột Ghi chú / Thông báo' },
                               ].map((row) => (
                                 <tr key={row.vn} className="hover:bg-[#15171c] transition-colors">
@@ -4282,9 +4316,26 @@ function GatePassApp() {
                       Đóng
                     </button>
                     <button 
-                      onClick={() => {
-                        localStorage.setItem('config_webhook_url', integrationWebhook);
-                        localStorage.setItem('config_sheet_name', integrationSheetName);
+                      onClick={async () => {
+                        const finalWebhook = (integrationWebhook?.trim() && !integrationWebhook.includes("your_make_webhook_id")) ? integrationWebhook.trim() : OFFICIAL_MAKE_WEBHOOK_URL;
+                        const finalSheet = (integrationSheetName?.trim() && integrationSheetName.trim() !== "DanhSachRaCong") ? integrationSheetName.trim() : OFFICIAL_SHEET_NAME;
+
+                        setIntegrationWebhook(finalWebhook);
+                        setIntegrationSheetName(finalSheet);
+                        localStorage.setItem('config_webhook_url', finalWebhook);
+                        localStorage.setItem('config_sheet_name', finalSheet);
+
+                        try {
+                          await setDoc(doc(db, 'system_settings', 'integration'), {
+                            webhookUrl: finalWebhook,
+                            sheetName: finalSheet,
+                            updatedAt: new Date().toISOString(),
+                            updatedBy: user?.email || 'Admin'
+                          }, { merge: true });
+                        } catch (err) {
+                          console.warn("Lỗi lưu cấu hình hệ thống lên Firestore:", err);
+                        }
+
                         setSaveConfigSuccess(true);
                         setTimeout(() => {
                           setSaveConfigSuccess(false);

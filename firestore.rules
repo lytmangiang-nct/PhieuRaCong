@@ -76,6 +76,11 @@ service cloud.firestore {
       allow write: if true;
     }
 
+    match /system_settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin() || isMasterAdmin();
+    }
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
