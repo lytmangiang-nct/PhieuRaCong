@@ -22,8 +22,6 @@ import {
 } from 'firebase/firestore';
 import { initializeApp, getApps } from 'firebase/app';
 import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
   onAuthStateChanged, 
   signOut, 
   User,
@@ -37,7 +35,6 @@ import { db, auth, firebaseConfig } from './firebase';
 import Webcam from "react-webcam";
 import { 
   Camera, 
-  Globe,
   CheckCircle2, 
   XCircle, 
   Loader2, 
@@ -504,8 +501,6 @@ function GatePassApp() {
   const [resetErrorMessage, setResetErrorMessage] = useState<string | null>(null);
   const [resetSentEmail, setResetSentEmail] = useState<string | null>(null);
   const [resendCooldown, setResendCooldown] = useState<number>(0);
-  const [unauthorizedDomainModal, setUnauthorizedDomainModal] = useState<string | null>(null);
-  const [hasCopiedDomain, setHasCopiedDomain] = useState(false);
 
   // Countdown timer cho nút Gửi lại liên kết mật khẩu
   useEffect(() => {
@@ -1210,29 +1205,6 @@ function GatePassApp() {
   }, [user, userProfile, isMockMode]);
 
   // --- Handlers ---
-  const handleGoogleLogin = async () => {
-    setLoginError(null);
-    try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(auth, provider);
-    } catch (error: any) {
-      console.error("Login failed", error);
-      const isUnauthorizedDomain = 
-        error?.code === 'auth/unauthorized-domain' || 
-        error?.message?.includes('auth/unauthorized-domain') ||
-        error?.message?.includes('unauthorized-domain');
-
-      if (isUnauthorizedDomain) {
-        const currentDomain = typeof window !== 'undefined' ? window.location.hostname : '';
-        setUnauthorizedDomainModal(currentDomain);
-        setLoginError(`Lỗi tên miền chưa được cấp phép (auth/unauthorized-domain): Tên miền "${currentDomain}" chưa được thêm vào mục Authorized Domains của Firebase Auth.`);
-      } else {
-        setLoginError(error.message || "Đăng nhập Google thất bại.");
-      }
-    }
-  };
-
   const handleBypassStudent = () => {
     setIsMockMode(true);
     const mockUser = {
@@ -1426,7 +1398,7 @@ function GatePassApp() {
     } catch (err: any) {
       console.error("Password reset error:", err);
       if (err.code === 'auth/user-not-found') {
-        setLoginError(`Email ${targetEmail} chưa có mật khẩu trên Firebase Auth. Bạn có thể bấm Đăng nhập Google.`);
+        setLoginError(`Email ${targetEmail} chưa có tài khoản mật khẩu trên hệ thống. Vui lòng liên hệ quản trị viên hoặc đăng ký học sinh mới.`);
       } else {
         setLoginError("Lỗi gửi link khôi phục: " + (err.message || String(err)));
       }
@@ -1457,7 +1429,7 @@ function GatePassApp() {
       try {
         await sendPasswordResetEmail(auth, targetEmail);
       } catch (authErr: any) {
-        // Trường hợp tài khoản chưa từng tạo mật khẩu trên Firebase Auth (ví dụ tài khoản Google hoặc được cấp qua whitelist/Firestore)
+        // Trường hợp tài khoản chưa từng tạo mật khẩu trên Firebase Auth
         if (authErr.code === 'auth/user-not-found') {
           try {
             const secondaryAppName = 'GatePassPasswordResetHelper';
@@ -1483,7 +1455,7 @@ function GatePassApp() {
     } catch (err: any) {
       console.error("Password reset error:", err);
       if (err.code === 'auth/user-not-found') {
-        setResetErrorMessage(`Email "${targetEmail}" chưa có tài khoản mật khẩu trên hệ thống. Nếu là tài khoản Google, bạn hãy bấm Đăng nhập bằng Google.`);
+        setResetErrorMessage(`Email "${targetEmail}" chưa có tài khoản mật khẩu trên hệ thống. Vui lòng kiểm tra lại hoặc liên hệ quản trị viên.`);
       } else if (err.code === 'auth/invalid-email') {
         setResetErrorMessage("Địa chỉ email không đúng định dạng.");
       } else if (err.code === 'auth/too-many-requests') {
@@ -1637,7 +1609,7 @@ function GatePassApp() {
         console.warn("Lỗi lưu account_directory admin:", dirErr);
       }
 
-      setCreateAdminSuccess(`Đã tạo thành công tài khoản Quản trị duyệt phép cho cán bộ "${cleanName}" (${cleanEmail}) với chức vụ ${newAdminPosition}! Cán bộ có thể đăng nhập ngay bằng mật khẩu vừa tạo hoặc đăng nhập bằng Google.`);
+      setCreateAdminSuccess(`Đã tạo thành công tài khoản Quản trị duyệt phép cho cán bộ "${cleanName}" (${cleanEmail}) với chức vụ ${newAdminPosition}! Cán bộ có thể đăng nhập ngay bằng mật khẩu vừa tạo.`);
       setNewAdminEmail('');
       setNewAdminName('');
       setNewAdminPhone('');
@@ -2976,94 +2948,13 @@ function GatePassApp() {
             </div>
 
             <div className="space-y-4 font-sans">
-              {/* Thông báo lỗi unauthorized-domain chuyên biệt hoặc lỗi thông thường */}
-              {(unauthorizedDomainModal || (loginError && loginError.includes('unauthorized-domain'))) ? (
-                <div className="p-4 bg-amber-500/10 border-2 border-amber-500/40 rounded-2xl text-amber-200 text-xs space-y-3 shadow-lg">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 text-amber-400 font-bold text-xs uppercase tracking-wider font-mono">
-                      <Globe className="w-4 h-4 shrink-0 text-amber-400 animate-pulse" />
-                      <span>Tên miền chưa được cấp phép (auth/unauthorized-domain)</span>
-                    </div>
-                    <button 
-                      type="button"
-                      onClick={() => setUnauthorizedDomainModal(null)}
-                      className="text-zinc-400 hover:text-white p-0.5 rounded cursor-pointer"
-                      title="Đóng thông báo"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  <p className="text-zinc-300 leading-relaxed text-[11px] sm:text-xs">
-                    Để bảo mật, Firebase chỉ cho phép đăng nhập Google trên các tên miền đã đăng ký trước. Tên miền hiện tại của trang web này chưa có trong danh sách được ủy quyền của dự án Firebase.
-                  </p>
-
-                  <div className="space-y-1.5">
-                    <span className="text-[10px] text-amber-300 font-mono font-bold uppercase block">
-                      Tên miền hiện tại cần thêm vào Firebase:
-                    </span>
-                    <div className="p-2.5 bg-black/60 border border-amber-500/40 rounded-xl flex items-center justify-between gap-2 font-mono">
-                      <span className="text-[#00FF00] font-bold text-xs select-all break-all">
-                        {unauthorizedDomainModal || (typeof window !== 'undefined' ? window.location.hostname : '')}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const host = unauthorizedDomainModal || (typeof window !== 'undefined' ? window.location.hostname : '');
-                          navigator.clipboard.writeText(host);
-                          setHasCopiedDomain(true);
-                          setTimeout(() => setHasCopiedDomain(false), 2500);
-                        }}
-                        className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 text-[11px] rounded-lg shrink-0 flex items-center gap-1 font-mono transition-all cursor-pointer active:scale-95"
-                      >
-                        {hasCopiedDomain ? (
-                          <>
-                            <Check className="w-3.5 h-3.5 text-[#00FF00]" />
-                            <span className="text-[#00FF00] font-bold">Đã chép!</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-3.5 h-3.5" />
-                            <span>Sao chép</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* 3 bước thao tác */}
-                  <div className="p-3 bg-black/40 border border-zinc-800 rounded-xl text-[11px] text-zinc-300 space-y-1.5 leading-relaxed font-sans">
-                    <div className="font-bold text-amber-400 font-mono flex items-center gap-1">
-                      <span>CÁCH THÊM MIỀN VÀO FIREBASE (CHỈ 30 GIÂY):</span>
-                    </div>
-                    <p>1. Bấm nút <strong>"Mở Cài đặt Firebase Auth"</strong> màu vàng bên dưới.</p>
-                    <p>2. Chọn tab <strong>Settings</strong>, kéo xuống mục <strong>Authorized domains (Miền được ủy quyền)</strong> rồi bấm <strong>Add domain (Thêm miền)</strong>.</p>
-                    <p>3. Dán tên miền vừa sao chép vào rồi bấm <strong>Add</strong>. Sau đó quay lại đây bấm đăng nhập Google là thành công ngay!</p>
-                  </div>
-
-                  {/* Nút hành động */}
-                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
-                    <a
-                      href={`https://console.firebase.google.com/project/${firebaseConfig.projectId || 'project-9da61282-0a45-4306-88d'}/authentication/settings`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex-1 bg-amber-500 hover:bg-amber-400 text-black font-bold py-2.5 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-mono uppercase tracking-wider shadow"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      Mở Cài đặt Firebase Auth
-                    </a>
-                  </div>
-
-                  <div className="pt-1 text-[11px] text-[#8E9299] text-center border-t border-zinc-800/80">
-                    💡 <span className="text-zinc-300 font-semibold">Đăng nhập ngay không cần chờ:</span> Bạn có thể đăng nhập bằng <span className="text-white font-semibold">Tài khoản & Mật khẩu</span> ở form bên dưới.
-                  </div>
-                </div>
-              ) : loginError ? (
+              {/* Thông báo lỗi nếu có */}
+              {loginError && (
                 <div className="p-3 bg-red-500/10 border border-red-500/40 rounded-xl text-red-400 text-xs flex items-center gap-2.5">
                   <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
                   <span>{loginError}</span>
                 </div>
-              ) : null}
+              )}
 
               {/* Thông báo đăng ký thành công */}
               {registerSuccess && (
@@ -3228,21 +3119,6 @@ function GatePassApp() {
                       : "GỬI LIÊN KẾT ĐẶT LẠI MẬT KHẨU"}
                   </button>
 
-                  {/* Lựa chọn đăng nhập Google nhanh */}
-                  <div className="pt-2 border-t border-[#1c1d21]/60 text-center space-y-2">
-                    <p className="text-[11px] text-[#8E9299]">
-                      Hoặc nếu bạn dùng tài khoản Google:
-                    </p>
-                    <button 
-                      type="button"
-                      onClick={handleGoogleLogin}
-                      className="w-full bg-white/10 hover:bg-white/20 text-white font-medium py-2.5 rounded-xl transition-all flex items-center justify-center gap-2 text-xs font-sans cursor-pointer border border-[#1c1d21]"
-                    >
-                      <img src="https://www.google.com/favicon.ico" className="w-3.5 h-3.5" alt="Google" />
-                      Đăng nhập bằng Google ngay (Không cần mật khẩu)
-                    </button>
-                  </div>
-
                   <button 
                     type="button" 
                     onClick={() => {
@@ -3257,25 +3133,7 @@ function GatePassApp() {
                 </form>
               ) : (
                 <div className="space-y-4">
-                  {/* 1. Nút Đăng nhập bằng Google */}
-                  <button 
-                    type="button"
-                    onClick={handleGoogleLogin}
-                    className="w-full bg-white hover:bg-zinc-100 text-black font-bold py-3 sm:py-3.5 rounded-xl transition-all flex items-center justify-center gap-2.5 active:scale-[0.99] cursor-pointer text-xs sm:text-sm uppercase tracking-wider shadow-sm font-mono"
-                  >
-                    <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="Google" />
-                    Đăng nhập bằng Google
-                  </button>
-
-                  {/* 2. Đường phân cách */}
-                  <div className="relative py-1">
-                    <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-[#1c1d21]"></div></div>
-                    <div className="relative flex justify-center text-[10px] sm:text-xs uppercase font-mono">
-                      <span className="bg-[#151619] px-3 text-[#8E9299]">Hoặc tài khoản đã đăng ký</span>
-                    </div>
-                  </div>
-
-                  {/* 3. Form đăng nhập bằng Email / SĐT / Tên tài khoản + Mật khẩu */}
+                  {/* Form đăng nhập bằng Email / SĐT / Tên tài khoản + Mật khẩu */}
                   <form onSubmit={handleEmailLogin} className="space-y-3.5">
                     <div className="space-y-1">
                       <label className="text-[10px] sm:text-xs text-[#8E9299] uppercase tracking-wider block font-bold font-mono">
@@ -6828,7 +6686,7 @@ function GatePassApp() {
                         • Khi duyệt, hệ thống tự động ghi nhận họ tên và chức vụ (<strong className="text-white">{newAdminPosition}</strong>) lên chữ ký điện tử của phiếu.
                       </p>
                       <p>
-                        • Cán bộ có thể đăng nhập bằng email & mật khẩu đã cấp, hoặc đăng nhập trực tiếp qua nút Google với cùng địa chỉ email.
+                        • Cán bộ có thể đăng nhập bằng email & mật khẩu đã cấp vào hệ thống.
                       </p>
                     </div>
 
