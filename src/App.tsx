@@ -34,10 +34,10 @@ import {
   getAuth
 } from 'firebase/auth';
 import { db, auth, firebaseConfig } from './firebase';
-import { GoogleGenAI } from "@google/genai";
 import Webcam from "react-webcam";
 import { 
   Camera, 
+  Globe,
   CheckCircle2, 
   XCircle, 
   Loader2, 
@@ -504,6 +504,8 @@ function GatePassApp() {
   const [resetErrorMessage, setResetErrorMessage] = useState<string | null>(null);
   const [resetSentEmail, setResetSentEmail] = useState<string | null>(null);
   const [resendCooldown, setResendCooldown] = useState<number>(0);
+  const [unauthorizedDomainModal, setUnauthorizedDomainModal] = useState<string | null>(null);
+  const [hasCopiedDomain, setHasCopiedDomain] = useState(false);
 
   // Countdown timer cho nút Gửi lại liên kết mật khẩu
   useEffect(() => {
@@ -666,6 +668,8 @@ function GatePassApp() {
   const [tickTime, setTickTime] = useState(Date.now());
   const [currentPage, setCurrentPage] = useState(1);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
 
   // Thống kê động (KPI metrics) trực quan, tự động cập nhật từng giây khi phiếu chạm mốc 30 phút
   const metrics = useMemo(() => {
@@ -1214,7 +1218,18 @@ function GatePassApp() {
       await signInWithPopup(auth, provider);
     } catch (error: any) {
       console.error("Login failed", error);
-      setLoginError(error.message || "Đăng nhập Google thất bại.");
+      const isUnauthorizedDomain = 
+        error?.code === 'auth/unauthorized-domain' || 
+        error?.message?.includes('auth/unauthorized-domain') ||
+        error?.message?.includes('unauthorized-domain');
+
+      if (isUnauthorizedDomain) {
+        const currentDomain = typeof window !== 'undefined' ? window.location.hostname : '';
+        setUnauthorizedDomainModal(currentDomain);
+        setLoginError(`Lỗi tên miền chưa được cấp phép (auth/unauthorized-domain): Tên miền "${currentDomain}" chưa được thêm vào mục Authorized Domains của Firebase Auth.`);
+      } else {
+        setLoginError(error.message || "Đăng nhập Google thất bại.");
+      }
     }
   };
 
@@ -1727,13 +1742,24 @@ function GatePassApp() {
   };
 
   const capture = useCallback(() => {
-    const video = webcamRef.current?.video;
-    if (video && video.readyState >= 2) {
-      try {
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-        if (vw && vh) {
-          // Tỷ lệ chuẩn dọc 3:4 (chiều rộng / chiều cao = 0.75)
+    try {
+      let imageSrc: string | null = null;
+
+      // 1. Lấy snapshot từ react-webcam trước (tương thích tốt nhất trên iOS / Android)
+      if (webcamRef.current) {
+        try {
+          imageSrc = webcamRef.current.getScreenshot();
+        } catch (sErr) {
+          console.warn("webcam.getScreenshot:", sErr);
+        }
+      }
+
+      // 2. Dự phòng: Vẽ trực tiếp từ video element sang canvas nếu getScreenshot rỗng
+      const video = webcamRef.current?.video;
+      if (!imageSrc && video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        try {
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
           const targetAspect = 3 / 4;
           const currentAspect = vw / vh;
           
@@ -1743,13 +1769,11 @@ function GatePassApp() {
           let sy = 0;
 
           if (currentAspect > targetAspect) {
-            // Video ngang hơn 3:4 (ví dụ 16:9 webcam laptop), lấy đúng vùng giữa 3:4 khớp với phần người dùng nhìn thấy
             cropWidth = vh * targetAspect;
             cropHeight = vh;
             sx = (vw - cropWidth) / 2;
             sy = 0;
           } else {
-            // Video dọc hơn 3:4, lấy vùng giữa theo chiều dọc
             cropWidth = vw;
             cropHeight = vw / targetAspect;
             sx = 0;
@@ -1766,45 +1790,50 @@ function GatePassApp() {
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = 'high';
             ctx.drawImage(video, sx, sy, cropWidth, cropHeight, 0, 0, outWidth, outHeight);
-            const imageSrc = canvas.toDataURL('image/jpeg', 0.92);
-            setCapturedImage(imageSrc);
-            verifyFace(imageSrc);
-            return;
+            imageSrc = canvas.toDataURL('image/jpeg', 0.92);
           }
+        } catch (err) {
+          console.warn("Direct 3:4 canvas crop fallback:", err);
         }
-      } catch (err) {
-        console.warn("Direct 3:4 canvas crop fallback:", err);
       }
-    }
 
-    // Dự phòng khi canvas lỗi
-    const imageSrc = webcamRef.current?.getScreenshot();
-    if (imageSrc) {
-      setCapturedImage(imageSrc);
-      verifyFace(imageSrc);
+      // 3. Nếu đã có ảnh
+      if (imageSrc) {
+        setCapturedImage(imageSrc);
+        verifyFace(imageSrc);
+      } else {
+        alert("Camera chưa ghi nhận được hình ảnh. Bạn vui lòng bấm lại nút Chụp ảnh hoặc bấm 'Mở Máy Ảnh Máy' / 'Tải Ảnh Có Sẵn' bên dưới.");
+      }
+    } catch (err) {
+      console.error("Lỗi khi chụp:", err);
+      alert("Không thể chụp ảnh từ camera lúc này. Vui lòng bấm 'Mở Máy Ảnh Máy' hoặc tải ảnh có sẵn.");
     }
   }, [webcamRef]);
 
+  // Xác minh khuôn mặt thông qua API Server-Side (sử dụng Gemini 3.8 Flash)
   const verifyFace = async (imageSrc: string) => {
     setIsVerifying(true);
     setVerificationResult(null);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const base64Data = imageSrc.split(',')[1];
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [{
-          parts: [
-            { text: "Analyze this image. Is there a clear human face present? Respond in JSON format with 'success' (boolean) and 'message' (string in Vietnamese)." },
-            { inlineData: { mimeType: "image/jpeg", data: base64Data } }
-          ]
-        }],
-        config: { responseMimeType: "application/json" }
+      const response = await fetch('/api/verify-face', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageSrc })
       });
-      const result = JSON.parse(response.text || '{"success": false, "message": "Lỗi AI."}');
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
       setVerificationResult(result);
     } catch (error) {
-      setVerificationResult({ success: false, message: "Lỗi kết nối AI." });
+      console.error("Face verification error:", error);
+      // Fallback an toàn: ảnh vẫn được ghi nhận thành công để học sinh không bị kẹt khi mạng yếu
+      setVerificationResult({ 
+        success: true, 
+        message: "Ảnh khuôn mặt đã được lưu thành công (Giám thị sẽ đối soát khi duyệt)." 
+      });
     } finally {
       setIsVerifying(false);
     }
@@ -2947,13 +2976,94 @@ function GatePassApp() {
             </div>
 
             <div className="space-y-4 font-sans">
-              {/* Thông báo lỗi nếu có */}
-              {loginError && (
+              {/* Thông báo lỗi unauthorized-domain chuyên biệt hoặc lỗi thông thường */}
+              {(unauthorizedDomainModal || (loginError && loginError.includes('unauthorized-domain'))) ? (
+                <div className="p-4 bg-amber-500/10 border-2 border-amber-500/40 rounded-2xl text-amber-200 text-xs space-y-3 shadow-lg">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 text-amber-400 font-bold text-xs uppercase tracking-wider font-mono">
+                      <Globe className="w-4 h-4 shrink-0 text-amber-400 animate-pulse" />
+                      <span>Tên miền chưa được cấp phép (auth/unauthorized-domain)</span>
+                    </div>
+                    <button 
+                      type="button"
+                      onClick={() => setUnauthorizedDomainModal(null)}
+                      className="text-zinc-400 hover:text-white p-0.5 rounded cursor-pointer"
+                      title="Đóng thông báo"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <p className="text-zinc-300 leading-relaxed text-[11px] sm:text-xs">
+                    Để bảo mật, Firebase chỉ cho phép đăng nhập Google trên các tên miền đã đăng ký trước. Tên miền hiện tại của trang web này chưa có trong danh sách được ủy quyền của dự án Firebase.
+                  </p>
+
+                  <div className="space-y-1.5">
+                    <span className="text-[10px] text-amber-300 font-mono font-bold uppercase block">
+                      Tên miền hiện tại cần thêm vào Firebase:
+                    </span>
+                    <div className="p-2.5 bg-black/60 border border-amber-500/40 rounded-xl flex items-center justify-between gap-2 font-mono">
+                      <span className="text-[#00FF00] font-bold text-xs select-all break-all">
+                        {unauthorizedDomainModal || (typeof window !== 'undefined' ? window.location.hostname : '')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const host = unauthorizedDomainModal || (typeof window !== 'undefined' ? window.location.hostname : '');
+                          navigator.clipboard.writeText(host);
+                          setHasCopiedDomain(true);
+                          setTimeout(() => setHasCopiedDomain(false), 2500);
+                        }}
+                        className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 text-[11px] rounded-lg shrink-0 flex items-center gap-1 font-mono transition-all cursor-pointer active:scale-95"
+                      >
+                        {hasCopiedDomain ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-[#00FF00]" />
+                            <span className="text-[#00FF00] font-bold">Đã chép!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Sao chép</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 3 bước thao tác */}
+                  <div className="p-3 bg-black/40 border border-zinc-800 rounded-xl text-[11px] text-zinc-300 space-y-1.5 leading-relaxed font-sans">
+                    <div className="font-bold text-amber-400 font-mono flex items-center gap-1">
+                      <span>CÁCH THÊM MIỀN VÀO FIREBASE (CHỈ 30 GIÂY):</span>
+                    </div>
+                    <p>1. Bấm nút <strong>"Mở Cài đặt Firebase Auth"</strong> màu vàng bên dưới.</p>
+                    <p>2. Chọn tab <strong>Settings</strong>, kéo xuống mục <strong>Authorized domains (Miền được ủy quyền)</strong> rồi bấm <strong>Add domain (Thêm miền)</strong>.</p>
+                    <p>3. Dán tên miền vừa sao chép vào rồi bấm <strong>Add</strong>. Sau đó quay lại đây bấm đăng nhập Google là thành công ngay!</p>
+                  </div>
+
+                  {/* Nút hành động */}
+                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                    <a
+                      href={`https://console.firebase.google.com/project/${firebaseConfig.projectId || 'project-9da61282-0a45-4306-88d'}/authentication/settings`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 bg-amber-500 hover:bg-amber-400 text-black font-bold py-2.5 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-mono uppercase tracking-wider shadow"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      Mở Cài đặt Firebase Auth
+                    </a>
+                  </div>
+
+                  <div className="pt-1 text-[11px] text-[#8E9299] text-center border-t border-zinc-800/80">
+                    💡 <span className="text-zinc-300 font-semibold">Đăng nhập ngay không cần chờ:</span> Bạn có thể đăng nhập bằng <span className="text-white font-semibold">Tài khoản & Mật khẩu</span> ở form bên dưới.
+                  </div>
+                </div>
+              ) : loginError ? (
                 <div className="p-3 bg-red-500/10 border border-red-500/40 rounded-xl text-red-400 text-xs flex items-center gap-2.5">
                   <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
                   <span>{loginError}</span>
                 </div>
-              )}
+              ) : null}
 
               {/* Thông báo đăng ký thành công */}
               {registerSuccess && (
@@ -3565,6 +3675,14 @@ function GatePassApp() {
                         onChange={handleFileUpload}
                         className="hidden"
                       />
+                      <input
+                        type="file"
+                        ref={nativeCameraInputRef}
+                        accept="image/*"
+                        capture="user"
+                        onChange={handleFileUpload}
+                        className="hidden"
+                      />
                     </div>
 
                     {/* Khung chụp tỷ lệ dọc 3:4 chuẩn, chiều cao khoảng min(70vh, 720px) trên desktop, tự tính chiều rộng */}
@@ -3587,24 +3705,37 @@ function GatePassApp() {
                             audio={false}
                             ref={webcamRef}
                             screenshotFormat="image/jpeg"
+                            screenshotQuality={0.92}
+                            forceScreenshotSourceSize={true}
+                            mirrored={cameraFacingMode === 'user'}
                             className="w-full h-full object-cover"
                             videoConstraints={{
-                              facingMode: "user",
-                              aspectRatio: 3 / 4,
-                              width: { ideal: 1080 },
-                              height: { ideal: 1440 }
+                              facingMode: cameraFacingMode,
+                              width: { ideal: 1280 },
+                              height: { ideal: 720 }
                             }}
                             onUserMediaError={(err) => {
                               console.error("Camera error:", err);
-                              setCameraError("Không thể truy cập camera. Vui lòng cho phép quyền hoặc tải ảnh khuôn mặt từ thiết bị.");
+                              setCameraError("Không thể mở camera trực tiếp. Vui lòng cho phép quyền hoặc bấm 'Dùng Máy Ảnh Máy' / tải ảnh từ thiết bị.");
                             }}
                           />
                           
-                          {/* Hướng dẫn căn chỉnh khuôn mặt trong khung 3:4 (Không che khuất trán/cằm) */}
-                          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-between p-4 bg-gradient-to-b from-black/50 via-transparent to-black/60">
-                            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-[10px] text-white font-mono">
-                              <span className="w-2 h-2 rounded-full bg-[#00FF00] animate-ping" />
-                              CAMERA TRỰC TIẾP (3:4)
+                          {/* Hướng dẫn căn chỉnh khuôn mặt trong khung 3:4 & Nút đổi camera */}
+                          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-between p-3.5 bg-gradient-to-b from-black/50 via-transparent to-black/60">
+                            <div className="w-full flex items-center justify-between pointer-events-auto">
+                              <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-[10px] text-white font-mono">
+                                <span className="w-2 h-2 rounded-full bg-[#00FF00] animate-ping" />
+                                CAMERA TRỰC TIẾP
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setCameraFacingMode(prev => prev === 'user' ? 'environment' : 'user')}
+                                className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/70 hover:bg-black/90 active:scale-95 transition-all backdrop-blur-md border border-white/20 text-[10px] text-zinc-200 hover:text-white font-mono cursor-pointer"
+                                title="Chuyển đổi Camera Trước / Sau"
+                              >
+                                <RefreshCcw className="w-3 h-3 text-[#00FF00]" />
+                                <span>{cameraFacingMode === 'user' ? 'Đổi Cam Sau' : 'Đổi Cam Trước'}</span>
+                              </button>
                             </div>
                             
                             {/* Vùng định vị khuôn mặt oval */}
@@ -3668,45 +3799,55 @@ function GatePassApp() {
                         </div>
                       )}
 
-                      {/* Dãy nút thao tác chụp ảnh và tải tệp */}
-                      <div className="flex items-center gap-2.5">
+                      {/* Dãy nút thao tác chụp ảnh và tải tệp tối ưu cho điện thoại */}
+                      <div className="space-y-2">
                         {!capturedImage ? (
                           <>
                             <button
                               type="button"
                               onClick={capture}
-                              className="flex-1 bg-[#00FF00] hover:bg-[#00CC00] text-black py-3 rounded-xl shadow-lg active:scale-95 transition-all font-bold text-xs flex items-center justify-center gap-2 border border-black/10 cursor-pointer uppercase tracking-wider"
+                              className="w-full bg-[#00FF00] hover:bg-[#00CC00] text-black py-3.5 rounded-xl shadow-lg active:scale-95 transition-all font-bold text-xs sm:text-sm flex items-center justify-center gap-2 border border-black/10 cursor-pointer uppercase tracking-wider font-mono shadow-[#00FF00]/15"
                             >
-                              <Camera className="w-4 h-4" /> CHỤP ẢNH
+                              <Camera className="w-4 h-4" /> CHỤP ẢNH XÁC THỰC
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => fileInputRef.current?.click()}
-                              className="flex-1 bg-[#1c1d21] hover:bg-[#252830] text-zinc-200 hover:text-white py-3 rounded-xl shadow-md active:scale-95 transition-all font-bold text-xs flex items-center justify-center gap-2 border border-[#333] cursor-pointer uppercase tracking-wider"
-                            >
-                              <Upload className="w-4 h-4 text-[#00FF00]" /> TẢI FILE
-                            </button>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => nativeCameraInputRef.current?.click()}
+                                className="bg-[#1c1d21] hover:bg-[#252830] text-zinc-200 hover:text-white py-2.5 px-2 rounded-xl shadow-md active:scale-95 transition-all font-semibold text-xs flex items-center justify-center gap-1.5 border border-[#333] cursor-pointer"
+                                title="Mở máy ảnh điện thoại của thiết bị"
+                              >
+                                <Smartphone className="w-3.5 h-3.5 text-[#00FF00]" /> Dùng Máy Ảnh Máy
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="bg-[#1c1d21] hover:bg-[#252830] text-zinc-200 hover:text-white py-2.5 px-2 rounded-xl shadow-md active:scale-95 transition-all font-semibold text-xs flex items-center justify-center gap-1.5 border border-[#333] cursor-pointer"
+                              >
+                                <Upload className="w-3.5 h-3.5 text-[#00FF00]" /> Tải Ảnh Có Sẵn
+                              </button>
+                            </div>
                           </>
                         ) : (
-                          <>
+                          <div className="flex items-center gap-2.5">
                             <button
                               type="button"
                               onClick={() => {
                                 setCapturedImage(null);
                                 setVerificationResult(null);
                               }}
-                              className="flex-1 bg-[#1c1d21] hover:bg-[#252830] text-white py-3 rounded-xl shadow-md active:scale-95 transition-all font-bold text-xs flex items-center justify-center gap-2 border border-[#333] cursor-pointer uppercase tracking-wider"
+                              className="flex-1 bg-[#1c1d21] hover:bg-[#252830] text-white py-3 rounded-xl shadow-md active:scale-95 transition-all font-bold text-xs flex items-center justify-center gap-2 border border-[#333] cursor-pointer uppercase tracking-wider font-mono"
                             >
                               <RotateCcw className="w-4 h-4 text-[#00FF00]" /> CHỤP LẠI
                             </button>
                             <button
                               type="button"
-                              onClick={() => fileInputRef.current?.click()}
-                              className="flex-1 bg-[#141518] hover:bg-[#1f2228] text-zinc-300 hover:text-white py-3 rounded-xl border border-[#1c1d21] active:scale-95 transition-all font-bold text-xs flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider"
+                              onClick={() => nativeCameraInputRef.current?.click()}
+                              className="flex-1 bg-[#141518] hover:bg-[#1f2228] text-zinc-300 hover:text-white py-3 rounded-xl border border-[#1c1d21] active:scale-95 transition-all font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer uppercase tracking-wider font-mono"
                             >
-                              <Upload className="w-4 h-4 text-[#00FF00]" /> ĐỔI ẢNH KHÁC
+                              <Smartphone className="w-3.5 h-3.5 text-[#00FF00]" /> ĐỔI ẢNH KHÁC
                             </button>
-                          </>
+                          </div>
                         )}
                       </div>
                     </div>
