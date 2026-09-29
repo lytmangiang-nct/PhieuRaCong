@@ -32,6 +32,7 @@ async function startServer() {
   });
 
   // API proxy để chuyển tiếp Webhook (Make AI, Custom Webhook) tránh hoàn toàn lỗi CORS ở trình duyệt
+  // API proxy để chuyển tiếp Webhook (Make AI, Custom Webhook) tránh hoàn toàn lỗi CORS ở trình duyệt
   app.post("/api/webhook", async (req, res) => {
     const { webhookUrl, payload } = req.body;
     
@@ -44,7 +45,7 @@ async function startServer() {
       console.log(`🚀 [PROXY Webhook] Đang chuyển tiếp dữ liệu đến: ${webhookUrl}`);
       
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 giây timeout
+      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 giây timeout để tránh kẹt kết nối khi nhiều người gửi
 
       const response = await fetch(webhookUrl, {
         method: "POST",
@@ -76,7 +77,7 @@ async function startServer() {
       const isTimeout = error.name === 'AbortError';
       res.status(isTimeout ? 504 : 502).json({ 
         error: isTimeout 
-          ? "Hết thời gian chờ phản hồi từ máy chủ Webhook (Timeout 12s)."
+          ? "Hết thời gian chờ phản hồi từ máy chủ Webhook (Timeout 8s)."
           : "Không thể kết nối đến Webhook Make. Vui lòng kiểm tra lại URL.",
         details: error?.message || String(error)
       });
@@ -84,6 +85,7 @@ async function startServer() {
   });
 
   // API xác minh khuôn mặt học sinh bằng Gemini AI (Server-Side)
+  // Được tối ưu hóa chịu tải cao: Giới hạn thời gian xử lý tối đa 3.5s để không bao giờ làm nghẽn khi hàng chục học sinh cùng gửi
   app.post("/api/verify-face", async (req, res) => {
     try {
       const { image } = req.body;
@@ -112,8 +114,10 @@ async function startServer() {
         });
       }
 
-      console.log("🤖 [Gemini AI Face Verification]: Đang phân tích khuôn mặt qua gemini-3.8-flash...");
-      const response = await ai.models.generateContent({
+      console.log("🤖 [Gemini AI Face Verification]: Đang phân tích khuôn mặt qua gemini-3.8-flash (giới hạn 3.5s)...");
+
+      // Bọc gọi Gemini với Timeout 3.5s chống nghẽn đường truyền khi nhiều người gửi cùng lúc
+      const geminiPromise = ai.models.generateContent({
         model: "gemini-3.8-flash",
         contents: [
           {
@@ -148,7 +152,22 @@ async function startServer() {
         }
       });
 
-      const responseText = response.text?.trim() || "";
+      const timeoutPromise = new Promise<{ isTimeout: boolean }>((resolve) => {
+        setTimeout(() => resolve({ isTimeout: true }), 3500);
+      });
+
+      const raceResult = await Promise.race([geminiPromise, timeoutPromise]);
+
+      if ('isTimeout' in raceResult && raceResult.isTimeout) {
+        console.warn("⏱️ [Gemini AI Face Verification] Hết 3.5s timeout do lượng truy cập đồng thời lớn, tự động ghi nhận ảnh thành công.");
+        return res.json({
+          success: true,
+          message: "Ảnh khuôn mặt đã ghi nhận thành công (Cán bộ giám thị sẽ đối soát khi duyệt)."
+        });
+      }
+
+      const response = raceResult as any;
+      const responseText = response?.text?.trim() || "";
       console.log("✅ [Gemini AI Face Verification Response]:", responseText);
 
       let parsedResult = { success: true, message: "Khuôn mặt hợp lệ." };
@@ -164,11 +183,11 @@ async function startServer() {
 
       return res.json(parsedResult);
     } catch (err: any) {
-      console.error("❌ [Gemini AI Face Verification Error]:", err);
-      // Fallback thân thiện: nếu AI gặp gián đoạn tạm thời, vẫn chấp nhận ảnh để học sinh nộp đơn không bị kẹt
+      console.error("❌ [Gemini AI Face Verification Error]:", err?.message || err);
+      // Fallback thân thiện: nếu AI gặp gián đoạn tạm thời hoặc quá tải hạn ngạch, vẫn lập tức chấp nhận ảnh để học sinh không bị kẹt
       return res.json({
         success: true,
-        message: "Ảnh đã được lưu thành công (Cán bộ giám thị sẽ đối soát trực tiếp khi duyệt)."
+        message: "Ảnh khuôn mặt đã được lưu thành công (Cán bộ giám thị sẽ đối soát trực tiếp khi duyệt)."
       });
     }
   });

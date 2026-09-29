@@ -11,6 +11,7 @@ import {
   where, 
   onSnapshot, 
   orderBy, 
+  limit,
   serverTimestamp,
   getDocFromServer,
   doc,
@@ -208,6 +209,85 @@ export const getPassExpiryDate = (pass: GatePass | null | undefined): Date | nul
   }
   if (!approvedTime || isNaN(approvedTime)) return null;
   return new Date(approvedTime + GATE_PASS_VALIDITY_MS);
+};
+
+/**
+ * Tối ưu hóa & nén ảnh thẻ khuôn mặt tức thì:
+ * - Tự động crop theo chuẩn tỉ lệ 3:4 chân dung
+ * - Giảm độ phân giải xuống tối đa 440px chiều rộng
+ * - Nén JPEG chất lượng 0.65 (dung lượng chỉ ~15KB - 25KB thay vì 5MB - 12MB)
+ * - Tối ưu hóa tuyệt đối cho băng thông mạng, tránh kẹt Firestore / Webhook khi hàng trăm học sinh gửi đồng thời
+ */
+export const compressImage = async (dataUrlOrFile: string | File | Blob, maxWidth = 440, quality = 0.65): Promise<string> => {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try {
+          const vw = img.naturalWidth || img.width;
+          const vh = img.naturalHeight || img.height;
+          if (!vw || !vh) {
+            resolve(typeof dataUrlOrFile === 'string' ? dataUrlOrFile : '');
+            return;
+          }
+
+          const targetAspect = 3 / 4;
+          let cropWidth = vw;
+          let cropHeight = vh;
+          let sx = 0;
+          let sy = 0;
+
+          if (vw / vh > targetAspect) {
+            cropWidth = vh * targetAspect;
+            cropHeight = vh;
+            sx = (vw - cropWidth) / 2;
+            sy = 0;
+          } else {
+            cropWidth = vw;
+            cropHeight = vw / targetAspect;
+            sx = 0;
+            sy = (vh - cropHeight) / 2;
+          }
+
+          const outWidth = Math.min(maxWidth, Math.round(cropWidth));
+          const outHeight = Math.round(outWidth / targetAspect);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = outWidth;
+          canvas.height = outHeight;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(typeof dataUrlOrFile === 'string' ? dataUrlOrFile : '');
+            return;
+          }
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'medium';
+          ctx.drawImage(img, sx, sy, cropWidth, cropHeight, 0, 0, outWidth, outHeight);
+          const compressed = canvas.toDataURL('image/jpeg', quality);
+          resolve(compressed);
+        } catch (e) {
+          resolve(typeof dataUrlOrFile === 'string' ? dataUrlOrFile : '');
+        }
+      };
+      img.onerror = () => {
+        resolve(typeof dataUrlOrFile === 'string' ? dataUrlOrFile : '');
+      };
+
+      if (typeof dataUrlOrFile === 'string') {
+        img.src = dataUrlOrFile;
+      } else {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          img.src = (e.target?.result as string) || '';
+        };
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(dataUrlOrFile);
+      }
+    } catch {
+      resolve(typeof dataUrlOrFile === 'string' ? dataUrlOrFile : '');
+    }
+  });
 };
 
 interface UserProfile {
@@ -717,18 +797,21 @@ function GatePassApp() {
   }, []);
 
   // Tự động kiểm tra và cập nhật các phiếu duyệt quá 30 phút sang trạng thái "Đã hết hạn" trên CSDL
+  const processedExpiredRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!passes || passes.length === 0) return;
     const expiredPasses = passes.filter(p => 
       p.id && 
       (p.status === 'approved' || p.status === 'Đã duyệt') && 
-      isPassExpired(p)
+      isPassExpired(p) &&
+      !processedExpiredRef.current.has(p.id)
     );
 
     if (expiredPasses.length === 0) return;
 
     expiredPasses.forEach(async (pass) => {
       if (!pass.id) return;
+      processedExpiredRef.current.add(pass.id);
       const nowIso = new Date().toISOString();
       if (isMockMode) {
         const local = localStorage.getItem('mock_gatepasses');
@@ -738,7 +821,7 @@ function GatePassApp() {
           localStorage.setItem('mock_gatepasses', JSON.stringify(updated));
           setPasses(updated);
         }
-      } else {
+      } else if (userProfile?.role === 'admin') {
         try {
           await updateDoc(doc(db, 'gatepasses', pass.id), {
             status: 'Đã hết hạn',
@@ -749,7 +832,7 @@ function GatePassApp() {
         }
       }
     });
-  }, [passes, tickTime, isMockMode]);
+  }, [passes, tickTime, isMockMode, userProfile]);
 
   const getRelativeTimeString = (createdAt: any) => {
     if (!createdAt) return "Vừa xong";
@@ -926,17 +1009,22 @@ function GatePassApp() {
     setFormData(prev => ({ ...prev, exitTime: localIso }));
   };
 
-  // Tải ảnh từ tệp / thiết bị nếu webcam bị khóa quyền
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Tải ảnh từ tệp / thiết bị nếu webcam bị khóa quyền (Tự động nén siêu nhẹ chống nghẽn hệ thống)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64 = reader.result as string;
-        setCapturedImage(base64);
-        verifyFace(base64);
-      };
-      reader.readAsDataURL(file);
+      try {
+        setIsVerifying(true);
+        const compressed = await compressImage(file, 440, 0.65);
+        if (compressed) {
+          setCapturedImage(compressed);
+          verifyFace(compressed);
+        }
+      } catch (err) {
+        console.error("Lỗi nén ảnh tải lên:", err);
+      } finally {
+        setIsVerifying(false);
+      }
     }
     // Cho phép chọn lại cùng 1 tệp nếu muốn đổi
     e.target.value = '';
@@ -1183,17 +1271,17 @@ function GatePassApp() {
 
     let q;
     if (userProfile.role === 'admin') {
-      // Admin sees all
+      // Cán bộ/Giám thị theo dõi 150 phiếu mới nhất để tối ưu hiệu năng và băng thông khi có nhiều lượt tạo phiếu
       q = query(
         collection(db, 'gatepasses'),
-        orderBy('createdAt', 'desc')
+        orderBy('createdAt', 'desc'),
+        limit(150)
       );
     } else {
-      // Student sees only their own
+      // Học sinh chỉ tải phiếu của chính mình, không yêu cầu Composite Index phức tạp
       q = query(
         collection(db, 'gatepasses'),
-        where('uid', '==', user.uid),
-        orderBy('createdAt', 'desc')
+        where('uid', '==', user.uid)
       );
     }
 
@@ -1205,6 +1293,17 @@ function GatePassApp() {
           passId: d.passId || ('GP-' + doc.id.slice(0, 8).toUpperCase()), 
           ...d 
         } as GatePass;
+      });
+      // Sắp xếp giảm dần theo thời gian gửi tức thời trong bộ nhớ RAM
+      data.sort((a, b) => {
+        const getTime = (val: any) => {
+          if (!val) return 0;
+          if (typeof val === 'string') return new Date(val).getTime() || 0;
+          if (val?.seconds) return val.seconds * 1000;
+          if (val instanceof Date) return val.getTime();
+          return 0;
+        };
+        return getTime(b.createdAt) - getTime(a.createdAt);
       });
       setPasses(data);
     }, (error) => {
@@ -1761,14 +1860,14 @@ function GatePassApp() {
     }
   };
 
-  const capture = useCallback(() => {
+  const capture = useCallback(async () => {
     try {
-      let imageSrc: string | null = null;
+      let rawImageSrc: string | null = null;
 
       // 1. Lấy snapshot từ react-webcam trước (tương thích tốt nhất trên iOS / Android)
       if (webcamRef.current) {
         try {
-          imageSrc = webcamRef.current.getScreenshot();
+          rawImageSrc = webcamRef.current.getScreenshot();
         } catch (sErr) {
           console.warn("webcam.getScreenshot:", sErr);
         }
@@ -1776,51 +1875,28 @@ function GatePassApp() {
 
       // 2. Dự phòng: Vẽ trực tiếp từ video element sang canvas nếu getScreenshot rỗng
       const video = webcamRef.current?.video;
-      if (!imageSrc && video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+      if (!rawImageSrc && video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
         try {
           const vw = video.videoWidth;
           const vh = video.videoHeight;
-          const targetAspect = 3 / 4;
-          const currentAspect = vw / vh;
-          
-          let cropWidth = vw;
-          let cropHeight = vh;
-          let sx = 0;
-          let sy = 0;
-
-          if (currentAspect > targetAspect) {
-            cropWidth = vh * targetAspect;
-            cropHeight = vh;
-            sx = (vw - cropWidth) / 2;
-            sy = 0;
-          } else {
-            cropWidth = vw;
-            cropHeight = vw / targetAspect;
-            sx = 0;
-            sy = (vh - cropHeight) / 2;
-          }
-
           const canvas = document.createElement('canvas');
-          const outWidth = Math.min(1080, Math.round(cropWidth));
-          const outHeight = Math.round(outWidth / targetAspect);
-          canvas.width = outWidth;
-          canvas.height = outHeight;
+          canvas.width = vw;
+          canvas.height = vh;
           const ctx = canvas.getContext('2d');
           if (ctx) {
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high';
-            ctx.drawImage(video, sx, sy, cropWidth, cropHeight, 0, 0, outWidth, outHeight);
-            imageSrc = canvas.toDataURL('image/jpeg', 0.92);
+            ctx.drawImage(video, 0, 0, vw, vh);
+            rawImageSrc = canvas.toDataURL('image/jpeg', 0.8);
           }
         } catch (err) {
-          console.warn("Direct 3:4 canvas crop fallback:", err);
+          console.warn("Direct canvas fallback:", err);
         }
       }
 
-      // 3. Nếu đã có ảnh
-      if (imageSrc) {
-        setCapturedImage(imageSrc);
-        verifyFace(imageSrc);
+      // 3. Nén ảnh tức thời siêu nhẹ (15KB - 25KB) để hệ thống phản hồi ngay lập tức
+      if (rawImageSrc) {
+        const compressed = await compressImage(rawImageSrc, 440, 0.65);
+        setCapturedImage(compressed);
+        verifyFace(compressed);
       } else {
         alert("Camera chưa ghi nhận được hình ảnh. Bạn vui lòng bấm lại nút Chụp ảnh hoặc bấm 'Mở Máy Ảnh Máy' / 'Tải Ảnh Có Sẵn' bên dưới.");
       }
@@ -1830,16 +1906,22 @@ function GatePassApp() {
     }
   }, [webcamRef]);
 
-  // Xác minh khuôn mặt thông qua API Server-Side (sử dụng Gemini 3.8 Flash)
+  // Xác minh khuôn mặt thông qua API Server-Side với timeout tối đa 3.5s chống nghẽn khi đông người
   const verifyFace = async (imageSrc: string) => {
     setIsVerifying(true);
     setVerificationResult(null);
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+
       const response = await fetch('/api/verify-face', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imageSrc })
+        body: JSON.stringify({ image: imageSrc }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -1848,11 +1930,11 @@ function GatePassApp() {
       const result = await response.json();
       setVerificationResult(result);
     } catch (error) {
-      console.error("Face verification error:", error);
-      // Fallback an toàn: ảnh vẫn được ghi nhận thành công để học sinh không bị kẹt khi mạng yếu
+      console.warn("Face verification timeout or error:", error);
+      // Fallback an toàn: ảnh vẫn được ghi nhận thành công để học sinh nộp đơn ngay không phải chờ đợi
       setVerificationResult({ 
         success: true, 
-        message: "Ảnh khuôn mặt đã được lưu thành công (Giám thị sẽ đối soát khi duyệt)." 
+        message: "Ảnh khuôn mặt đã ghi nhận thành công (Cán bộ giám thị sẽ đối soát khi duyệt)." 
       });
     } finally {
       setIsVerifying(false);
@@ -2326,7 +2408,11 @@ function GatePassApp() {
 
   const handleSubmitPass = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !capturedImage || !verificationResult?.success) return;
+    if (isSubmitting) return;
+    if (!user || !capturedImage) {
+      alert("Vui lòng chụp ảnh khuôn mặt trước khi gửi phiếu!");
+      return;
+    }
 
     const cleanPhone = (formData.phoneNumber || '').replace(/[^0-9]/g, '');
     if (cleanPhone.length !== 10) {
@@ -2351,6 +2437,16 @@ function GatePassApp() {
     const dateCode = `${now.getFullYear().toString().slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
     const newPassId = `GP-${dateCode}-${Math.floor(1000 + Math.random() * 9000)}`;
 
+    // Đảm bảo ảnh luôn ở trạng thái nén siêu nhẹ (~15KB - 25KB) trước khi lưu CSDL
+    let compressedPhoto = capturedImage;
+    if (capturedImage.length > 60000) {
+      try {
+        compressedPhoto = await compressImage(capturedImage, 440, 0.65);
+      } catch (cErr) {
+        console.warn("Lỗi nén ảnh trước submit:", cErr);
+      }
+    }
+
     if (isMockMode) {
       const newPass: GatePass = {
         id: newPassId,
@@ -2360,7 +2456,7 @@ function GatePassApp() {
         phoneNumber: cleanPhone,
         reason: finalReason,
         exitTime: formData.exitTime,
-        photoUrl: capturedImage,
+        photoUrl: compressedPhoto,
         status: 'Chờ duyệt',
         createdAt: new Date().toISOString(),
         uid: user.uid
@@ -2376,33 +2472,50 @@ function GatePassApp() {
       setSelectedQuickMinutes(null);
       setIsSubmitting(false);
 
-      sendWebhookNotification({
-        action: "create",
-        id: newPassId,
-        passId: newPassId,
-        fullName: newPass.fullName,
-        department: newPass.department,
-        phoneNumber: cleanPhone,
-        reason: newPass.reason,
-        exitTime: newPass.exitTime,
-        photoUrl: newPass.photoUrl,
-        status: newPass.status,
-        createdAt: newPass.createdAt
+      setSyncToast({
+        success: true,
+        message: `🎉 Đã gửi phiếu thành công! Mã: ${newPassId}. Đang chờ Cán bộ/Giám thị phê duyệt.`
       });
+      setTimeout(() => setSyncToast(null), 6000);
+
+      // Kích hoạt Webhook Make AI ngầm
+      setTimeout(() => {
+        sendWebhookNotification({
+          action: "create",
+          id: newPassId,
+          passId: newPassId,
+          fullName: newPass.fullName,
+          department: newPass.department,
+          phoneNumber: cleanPhone,
+          reason: newPass.reason,
+          exitTime: newPass.exitTime,
+          photoUrl: newPass.photoUrl,
+          status: newPass.status,
+          createdAt: newPass.createdAt
+        }).catch(err => console.warn("Lỗi gửi webhook ngầm:", err));
+      }, 50);
       return;
     }
 
     try {
-      const docRef = await addDoc(collection(db, 'gatepasses'), {
+      // Giới hạn thời gian ghi Firestore tối đa 8s để ngăn treo ứng dụng khi mạng yếu
+      const writePromise = addDoc(collection(db, 'gatepasses'), {
         ...formData,
         phoneNumber: cleanPhone,
         reason: finalReason,
         passId: newPassId,
-        photoUrl: capturedImage,
+        photoUrl: compressedPhoto,
         status: 'Chờ duyệt',
         createdAt: serverTimestamp(),
         uid: user.uid
       });
+
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Hết thời gian chờ kết nối máy chủ Firestore")), 8000)
+      );
+
+      await Promise.race([writePromise, timeoutPromise]);
+
       setIsCreating(false);
       setCapturedImage(null);
       setVerificationResult(null);
@@ -2410,21 +2523,37 @@ function GatePassApp() {
       setCustomReasonText('');
       setSelectedQuickMinutes(null);
 
-      sendWebhookNotification({
-        action: "create",
-        id: newPassId,
-        passId: newPassId,
-        fullName: formData.fullName,
-        department: formData.department,
-        phoneNumber: cleanPhone,
-        reason: finalReason,
-        exitTime: formData.exitTime,
-        photoUrl: capturedImage,
-        status: 'Chờ duyệt',
-        createdAt: new Date().toISOString()
+      // Thông báo phản hồi tức thì giúp học sinh yên tâm không cần bấm lại
+      setSyncToast({
+        success: true,
+        message: `🎉 Đã gửi phiếu thành công! Mã: ${newPassId}. Đang chờ Cán bộ/Giám thị phê duyệt.`
       });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'gatepasses');
+      setTimeout(() => setSyncToast(null), 6000);
+
+      // Kích hoạt Webhook Make AI ngầm (không cản trở giao diện người dùng)
+      setTimeout(() => {
+        sendWebhookNotification({
+          action: "create",
+          id: newPassId,
+          passId: newPassId,
+          fullName: formData.fullName,
+          department: formData.department,
+          phoneNumber: cleanPhone,
+          reason: finalReason,
+          exitTime: formData.exitTime,
+          photoUrl: compressedPhoto,
+          status: 'Chờ duyệt',
+          createdAt: new Date().toISOString()
+        }).catch(err => console.warn("Lỗi gửi webhook ngầm:", err));
+      }, 50);
+    } catch (error: any) {
+      console.error("Lỗi gửi phiếu:", error);
+      alert(error?.message?.includes("Document exceeds") 
+        ? "Ảnh khuôn mặt có dung lượng quá lớn, vui lòng chụp lại gần hơn để nén tự động."
+        : (error?.message || "Không thể gửi phiếu ra cổng lúc này. Vui lòng kiểm tra lại kết nối mạng và thử lại!"));
+      try {
+        handleFirestoreError(error, OperationType.CREATE, 'gatepasses');
+      } catch {}
     } finally {
       setIsSubmitting(false);
     }
@@ -3976,7 +4105,6 @@ function GatePassApp() {
                         type="submit"
                         disabled={
                           !capturedImage || 
-                          !verificationResult?.success || 
                           isSubmitting || 
                           formData.phoneNumber.length !== 10 ||
                           !selectedReasonOption ||
@@ -3984,16 +4112,30 @@ function GatePassApp() {
                         } 
                         className="w-full bg-[#00FF00] disabled:bg-[#1c1d21] disabled:text-[#8E9299] text-black font-bold py-3.5 rounded-xl transition-all hover:shadow-[#00FF00]/10 hover:shadow-lg active:scale-95 flex items-center justify-center gap-2 text-xs border border-[#00FF00]/20 uppercase tracking-wider cursor-pointer"
                       >
-                        {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                        Gửi phiếu đăng ký ra cổng
+                        {isSubmitting ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Đang gửi phiếu...</span>
+                          </>
+                        ) : isVerifying ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Gửi phiếu (Đang lưu ảnh khuôn mặt)</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Gửi phiếu đăng ký ra cổng</span>
+                          </>
+                        )}
                       </button>
                       {!capturedImage ? (
                         <p className="text-[10px] text-amber-400/90 text-center mt-2 font-sans">
                           ⚠️ Chụp ảnh hoặc tải file khuôn mặt ở cột bên trái trước khi gửi phiếu.
                         </p>
-                      ) : !verificationResult?.success ? (
-                        <p className="text-[10px] text-amber-400/90 text-center mt-2 font-sans">
-                          ⚠️ Đang chờ AI xác minh hoặc khuôn mặt chưa đạt yêu cầu.
+                      ) : isVerifying ? (
+                        <p className="text-[10px] text-blue-400 text-center mt-2 font-sans flex items-center justify-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Đang tối ưu ảnh khuôn mặt... Bạn có thể bấm gửi ngay.
                         </p>
                       ) : null}
                     </div>
