@@ -365,6 +365,69 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 
   render() {
     if (this.state.hasError) {
+      let rawError = "";
+      try {
+        const parsed = JSON.parse(this.state.error.message);
+        rawError = parsed.error || this.state.error.message;
+      } catch {
+        rawError = this.state.error?.message || String(this.state.error);
+      }
+
+      const isQuotaError = rawError.toLowerCase().includes("quota exceeded") || 
+                           rawError.toLowerCase().includes("quota limit exceeded") ||
+                           rawError.includes("Free daily read units");
+
+      const projectId = "project-9da61282-0a45-4306-88d";
+      const databaseId = "ai-studio-060394d2-2aae-43a0-a3d2-097bf3ccdfd2";
+      const upgradeUrl = `https://console.firebase.google.com/project/${projectId}/firestore/databases/${databaseId}/data?openUpgradeDialog=true`;
+
+      if (isQuotaError) {
+        return (
+          <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4">
+            <div className="max-w-lg w-full bg-[#141414] border border-amber-500/30 rounded-2xl p-6 md:p-8 text-center shadow-2xl">
+              <div className="w-14 h-14 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <AlertCircle className="w-8 h-8 text-amber-400" />
+              </div>
+              <h2 className="text-xl font-bold text-white mb-2 font-mono">Đã đạt giới hạn đọc miễn phí Firestore hôm nay</h2>
+              <p className="text-gray-300 mb-4 text-xs leading-relaxed">
+                Dự án Firebase đã sử dụng hết hạn ngạch đọc miễn phí hàng ngày (<span className="text-amber-400 font-semibold">Free daily read units per project</span>). Hạn ngạch sẽ tự động được làm mới (reset) vào ngày mai (00:00 UTC).
+              </p>
+              <div className="bg-black/50 border border-white/10 rounded-xl p-3 mb-5 text-left text-[11px] text-gray-400 space-y-1">
+                <div>• Thông tin hạn ngạch Spark: <a href="https://firebase.google.com/pricing#cloud-firestore" target="_blank" rel="noreferrer" className="text-[#00FF00] underline">Xem gói Enterprise / Spark</a></div>
+                <div>• Quản lý & nâng cấp cơ sở dữ liệu:</div>
+                <a 
+                  href={upgradeUrl} 
+                  target="_blank" 
+                  rel="noreferrer"
+                  className="block mt-1 text-[#00FF00] hover:underline font-mono break-all text-[10px]"
+                >
+                  {upgradeUrl}
+                </a>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <a
+                  href={upgradeUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 py-3 px-4 bg-amber-500 hover:bg-amber-600 text-black font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2"
+                >
+                  Nâng cấp hạn ngạch tại Firebase
+                </a>
+                <button
+                  onClick={() => {
+                    localStorage.setItem('gatepass_mock_mode', 'true');
+                    window.location.reload();
+                  }}
+                  className="flex-1 py-3 px-4 bg-[#1f2024] hover:bg-[#2b2d33] text-white border border-white/10 font-medium rounded-xl text-xs transition-colors"
+                >
+                  Mở chế độ Demo ngoại tuyến
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       let errorMessage = "An unexpected error occurred.";
       try {
         const parsedError = JSON.parse(this.state.error.message);
@@ -420,6 +483,7 @@ function GatePassApp() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [savedAccounts, setSavedAccounts] = useState<any[]>([]);
   const [selectedSavedAccount, setSelectedSavedAccount] = useState<any | null>(null);
+  const [isQuotaExceeded, setIsQuotaExceeded] = useState(false);
 
   // Đọc danh sách tài khoản đã có / đã lưu từ localStorage và Firestore
   useEffect(() => {
@@ -1119,74 +1183,88 @@ function GatePassApp() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
-        // Fetch or create user profile
-        const userDocRef = doc(db, 'users', currentUser.uid);
-        const userDoc = await getDoc(userDocRef);
-        
         const currentUserEmail = (currentUser.email || '').toLowerCase().trim();
         const emailKey = currentUserEmail.replace(/\./g, '_');
-        
-        let isWhitelistedAdmin = false;
-        let whitelistData: any = null;
+        const isAdminEmail = currentUserEmail === 'lytm.angiang@gmail.com' || currentUserEmail.includes('admin');
+
         try {
-          const wlDoc = await getDoc(doc(db, 'admin_whitelist', emailKey));
-          if (wlDoc.exists()) {
-            isWhitelistedAdmin = true;
-            whitelistData = wlDoc.data();
-          }
-        } catch (e) {
-          console.warn("Lỗi kiểm tra whitelist admin:", e);
-        }
-
-        const isAdminEmail = currentUserEmail === 'lytm.angiang@gmail.com' || isWhitelistedAdmin || currentUserEmail.includes('admin');
-
-        if (userDoc.exists()) {
-          const profile = userDoc.data() as UserProfile;
-          if (currentUserEmail === 'lytm.angiang@gmail.com') {
-            profile.role = 'admin';
-            profile.displayName = 'Trần Minh Lý';
-            profile.position = 'Bí thư ĐT';
-            try {
-              await setDoc(userDocRef, { 
-                role: 'admin', 
-                position: 'Bí thư ĐT',
-                displayName: 'Trần Minh Lý' 
-              }, { merge: true });
-            } catch (err) {
-              console.warn("Lỗi đồng bộ quyền Admin cấp cao:", err);
-            }
-          } else if (isAdminEmail && profile.role !== 'admin') {
-            profile.role = 'admin';
-            profile.position = profile.position || whitelistData?.position || 'Bí thư ĐT';
-            profile.displayName = profile.displayName || whitelistData?.displayName || currentUser.displayName || 'Cán bộ quản trị';
-            try {
-              await setDoc(userDocRef, { 
-                role: 'admin', 
-                position: profile.position,
-                displayName: profile.displayName 
-              }, { merge: true });
-            } catch (err) {
-              console.warn("Lỗi đồng bộ quyền Admin:", err);
+          // Fetch or create user profile with Quota safety
+          const userDocRef = doc(db, 'users', currentUser.uid);
+          let userDoc: any = null;
+          try {
+            userDoc = await getDoc(userDocRef);
+          } catch (docErr: any) {
+            console.warn("Lỗi đọc userDoc:", docErr?.message);
+            if (String(docErr).includes("Quota exceeded") || String(docErr).includes("quota metric")) {
+              setIsQuotaExceeded(true);
             }
           }
-          setUserProfile(profile);
-        } else {
-          // If profile doesn't exist (e.g. Google login for first time)
-          const newProfile: UserProfile = {
+          
+          let isWhitelistedAdmin = false;
+          let whitelistData: any = null;
+          try {
+            const wlDoc = await getDoc(doc(db, 'admin_whitelist', emailKey));
+            if (wlDoc?.exists()) {
+              isWhitelistedAdmin = true;
+              whitelistData = wlDoc.data();
+            }
+          } catch (e) {
+            console.warn("Lỗi kiểm tra whitelist admin:", e);
+          }
+
+          if (userDoc && userDoc.exists()) {
+            const profile = userDoc.data() as UserProfile;
+            if (currentUserEmail === 'lytm.angiang@gmail.com') {
+              profile.role = 'admin';
+              profile.displayName = 'Trần Minh Lý';
+              profile.position = 'Bí thư ĐT';
+              try {
+                await setDoc(userDocRef, { 
+                  role: 'admin', 
+                  position: 'Bí thư ĐT',
+                  displayName: 'Trần Minh Lý' 
+                }, { merge: true });
+              } catch (err) {}
+            } else if (isAdminEmail && profile.role !== 'admin') {
+              profile.role = 'admin';
+              profile.position = profile.position || whitelistData?.position || 'Bí thư ĐT';
+              profile.displayName = profile.displayName || whitelistData?.displayName || currentUser.displayName || 'Cán bộ quản trị';
+              try {
+                await setDoc(userDocRef, { 
+                  role: 'admin', 
+                  position: profile.position,
+                  displayName: profile.displayName 
+                }, { merge: true });
+              } catch (err) {}
+            }
+            setUserProfile(profile);
+          } else {
+            // If profile doesn't exist (e.g. Google login for first time) or quota reached
+            const newProfile: UserProfile = {
+              uid: currentUser.uid,
+              email: currentUser.email || '',
+              role: (isAdminEmail || isWhitelistedAdmin) ? 'admin' : 'student',
+              displayName: currentUserEmail === 'lytm.angiang@gmail.com' ? 'Trần Minh Lý' : (currentUser.displayName || (whitelistData?.displayName) || 'Người dùng'),
+              position: currentUserEmail === 'lytm.angiang@gmail.com' ? 'Bí thư ĐT' : ((isAdminEmail || isWhitelistedAdmin) ? (whitelistData?.position || 'Bí thư ĐT') : undefined),
+              phoneNumber: whitelistData?.phoneNumber || undefined,
+              isVerified: true
+            };
+            try {
+              await setDoc(userDocRef, newProfile);
+            } catch (err) {}
+            setUserProfile(newProfile);
+          }
+        } catch (e: any) {
+          console.warn("Lỗi đồng bộ hồ sơ đăng nhập:", e);
+          const fallbackProfile: UserProfile = {
             uid: currentUser.uid,
             email: currentUser.email || '',
             role: isAdminEmail ? 'admin' : 'student',
-            displayName: currentUserEmail === 'lytm.angiang@gmail.com' ? 'Trần Minh Lý' : (currentUser.displayName || (whitelistData?.displayName) || 'Học sinh'),
-            position: currentUserEmail === 'lytm.angiang@gmail.com' ? 'Bí thư ĐT' : (isAdminEmail ? (whitelistData?.position || 'Bí thư ĐT') : undefined),
-            phoneNumber: whitelistData?.phoneNumber || undefined,
+            displayName: currentUserEmail === 'lytm.angiang@gmail.com' ? 'Trần Minh Lý' : (currentUser.displayName || 'Người dùng'),
+            position: isAdminEmail ? 'Bí thư ĐT' : undefined,
             isVerified: true
           };
-          try {
-            await setDoc(userDocRef, newProfile);
-            setUserProfile(newProfile);
-          } catch (err) {
-            console.error("Failed to create profile:", err);
-          }
+          setUserProfile(fallbackProfile);
         }
         setUser(currentUser);
       } else {
@@ -1269,7 +1347,7 @@ function GatePassApp() {
 
     if (!user || !userProfile) return;
 
-    let q;
+    let q: any;
     if (userProfile.role === 'admin') {
       // Cán bộ/Giám thị theo dõi 150 phiếu mới nhất để tối ưu hiệu năng và băng thông khi có nhiều lượt tạo phiếu
       q = query(
@@ -1285,7 +1363,7 @@ function GatePassApp() {
       );
     }
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(q, (snapshot: any) => {
       const data = snapshot.docs.map(doc => {
         const d = doc.data();
         return { 
@@ -1306,8 +1384,23 @@ function GatePassApp() {
         return getTime(b.createdAt) - getTime(a.createdAt);
       });
       setPasses(data);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'gatepasses');
+    }, (error: any) => {
+      console.warn("Lỗi onSnapshot gatepasses:", error);
+      const errStr = error?.message || String(error);
+      if (errStr.includes("Quota exceeded") || errStr.includes("quota metric") || errStr.includes("Free daily read units")) {
+        setIsQuotaExceeded(true);
+        // Tự động nạp dữ liệu cục bộ đã lưu để người dùng không bị kẹt màn hình
+        const local = localStorage.getItem('mock_gatepasses');
+        if (local) {
+          try {
+            setPasses(JSON.parse(local));
+          } catch {}
+        }
+      } else {
+        try {
+          handleFirestoreError(error, OperationType.LIST, 'gatepasses');
+        } catch {}
+      }
     });
 
     return () => unsubscribe();
@@ -3407,8 +3500,38 @@ function GatePassApp() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-mono">
+      {/* Cảnh báo hạn ngạch Firestore Quota nếu dự án chạm giới hạn đọc miễn phí trong ngày */}
+      {isQuotaExceeded && (
+        <div className="bg-amber-500/15 border-b border-amber-500/40 px-4 py-2.5 text-xs text-amber-300 flex flex-wrap items-center justify-between gap-3 font-sans sticky top-0 z-50 backdrop-blur-md shadow-lg">
+          <div className="flex items-center gap-2 max-w-3xl">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="leading-snug">
+              <strong>Thông báo hạn ngạch:</strong> Dự án Firebase đã chạm giới hạn đọc miễn phí hàng ngày (Free daily read units). Dữ liệu sẽ tự động reset vào 00:00 UTC (ngày mai). Ứng dụng đang phục vụ bằng bộ nhớ cục bộ.
+            </span>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <a
+              href="https://console.firebase.google.com/project/project-9da61282-0a45-4306-88d/firestore/databases/ai-studio-060394d2-2aae-43a0-a3d2-097bf3ccdfd2/data?openUpgradeDialog=true"
+              target="_blank"
+              rel="noreferrer"
+              className="text-[#00FF00] underline font-bold hover:text-white"
+            >
+              Nâng cấp Firestore Quota →
+            </a>
+            <a
+              href="https://firebase.google.com/pricing#cloud-firestore"
+              target="_blank"
+              rel="noreferrer"
+              className="text-gray-400 underline hover:text-white text-[11px]"
+            >
+              Xem biểu phí Spark
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
-      <header className="border-b border-[#1c1d21] bg-[#0a0a0a]/80 backdrop-blur-md sticky top-0 z-50">
+      <header className="border-b border-[#1c1d21] bg-[#0a0a0a]/80 backdrop-blur-md sticky top-0 z-40">
         <div className="w-[98%] max-w-[2000px] mx-auto px-3 sm:px-5 md:px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-[#00FF00] rounded flex items-center justify-center"><ShieldCheck className="w-5 h-5 text-black" /></div>
